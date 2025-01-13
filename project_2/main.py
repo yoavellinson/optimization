@@ -2,8 +2,8 @@ import numpy as np
 from scipy.io import loadmat
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.sparse import eye, diags, lil_matrix
-
+from scipy.sparse import eye, diags, lil_matrix,hstack,csr_matrix
+from scipy import sparse
 def construct_D_matrices(M, N):
     MN = M*N 
     #D_x
@@ -45,6 +45,38 @@ def construct_D_matrices_sparse(M, N):
 
     return D_x, D_y
 
+
+def construct_D_matrices_3D_sparse(M, N, P):
+    MN = M * N  # Number of cells in each 2D slice
+    MNP = M * N * P  # Total number of cells in the 3D grid
+
+    # Construct D_x (finite differences along x-axis)
+    diagonals_x = [-np.ones(MNP), np.ones(MNP - 1)]
+    offsets_x = [0, 1]
+    D_x = diags(diagonals_x, offsets_x, shape=(MNP, MNP), format='lil')
+    
+    for z in range(P):  
+        for i in range(N - 1, MN + z * MN, N):
+            D_x[i, i] = 0
+            if i + 1 < MNP:
+                D_x[i, i + 1] = 0
+    D_x = D_x.tocsr()  
+
+    D_y = lil_matrix((MNP, MNP))
+    for z in range(P):  
+        for i in range((M - 1) * N + z * MN):  
+            D_y[i, i] = -1
+            if i + N < MNP:
+                D_y[i, i + N] = 1
+    D_y = D_y.tocsr()  
+
+    D_z = lil_matrix((MNP, MNP))
+    for i in range(MN * (P - 1)):  
+        D_z[i, i] = -1
+        D_z[i, i + MN] = 1
+    D_z = D_z.tocsr()  
+
+    return D_x, D_y, D_z
 
 def col_stack(x):
     return x.flatten('F')
@@ -150,43 +182,42 @@ def Q9():
     # print(f'The condition number of Q is {kappa}\nMax_eig_val:{max(u)}\nMin_eig_val:{min(u)}')
     return A,L
 
+def compute_W_sqrt(L, x, epsilon=1e-5):
+    gamma = L @ x  
+    W_diag = np.where(np.abs(gamma) >= epsilon, 1.0 / np.abs(gamma), 1.0 / epsilon)
+    W = diags(np.sqrt(W_diag))
+    return W
 
-def cgls(A, L, y, max_iter=100, eps=1e-6, lambda_reg=1e-5):
-    """
-    Conjugate Gradient Least Squares (CGLS) method with guidelines from the image.
-
-    Parameters:
-    - A: np.ndarray, the system matrix (m x (M*N))
-    - L: np.ndarray, regularization operator
-    - y: np.ndarray, the measurement vector (m x 1)
-    - max_iter: int, maximum number of iterations
-    - eps: float, tolerance for stopping criterion
-    - lambda_reg: float, regularization parameter
-
-    Returns:
-    - x: np.ndarray, the solution vector (n x 1)
-    - residuals: list, residuals at each iteration
-    - k: int, number of iterations
-    """
+def cgls(A, L, y, max_iter=100, eps=1e-6, lambda_reg=1e-5,x_0=[0],irls=False):
     m, n = A.shape
-    x = np.zeros(n)  # x_0 is zeros
+    if x_0[0] != 0:
+        x = x_0
+    else:
+        x = np.zeros(n)  # x_0 is zeros
 
     sqrt_lambda = np.sqrt(lambda_reg)
-    A = np.vstack([A, sqrt_lambda * L])
-    y = np.concatenate([y, np.zeros(L.shape[0])])
-    s_k= A@x -y
+    if not irls:
+        A = sparse.vstack([A, sqrt_lambda * L])
+    else:
+        W_sqrt = compute_W_sqrt(L,x)
+        A = sparse.vstack([A, (sqrt_lambda)*(W_sqrt@L) ])
+        
+    if len(y.shape) ==1:
+        y = np.expand_dims(y,1)
+    y = np.vstack([y, np.zeros((L.shape[0],1))])
+    s_k= np.expand_dims(A@x,1) -y
     g_k = A.T @ s_k
+    g_0 = g_k.copy()
     d = -g_k  # d_0 = -g_0
     residuals = [np.linalg.norm(g_k)]  # initial gradient norm
     
     for k in range(max_iter):
-        # Compute Ad_k
+        #compute Ad_k to simplify for the future
         Ad = A @ d
-
-        # Compute step size alpha_k
-        alpha = np.dot(g_k, g_k) / (d.T@A.T @ Ad)
-        # Update the solution
-        x += alpha * d
+        #compute step size alpha_k
+        alpha = (g_k.T @ g_k) / (d.T@A.T @ Ad)
+        #update the solution
+        x += (alpha.squeeze() * d).reshape(x.shape)
         s_k += alpha * Ad  # s_{k+1} = s_k + alpha_k A d_k
         g_k_plus_1 = A.T @ s_k
 
@@ -195,13 +226,11 @@ def cgls(A, L, y, max_iter=100, eps=1e-6, lambda_reg=1e-5):
         residuals.append(gradient_norm)
         if gradient_norm < eps:
             break
-        
         # compute beta_k for the new search direction and update
-        beta = np.dot(g_k_plus_1, g_k_plus_1) / np.dot(g_k, g_k)
+        beta = ((g_k_plus_1.T@ g_k_plus_1) / (g_k.T@ g_k)).squeeze()
         d = -g_k_plus_1 + beta * d
         #for next iter
         g_k = g_k_plus_1 
-
     return x, residuals, k
 
 def Q10_toy():
@@ -220,3 +249,142 @@ def Q10_toy():
     x_cgls,res,k = cgls(A,L,y)
     print(k)
 
+def Q11_small():
+    import matplotlib 
+    matplotlib.use('WebAgg')
+    import matplotlib.pyplot as plt
+    y = loadmat('Small/y.mat')['y']
+    A = loadmat('Small/A.mat')['A']
+    M,N,P = (19,19,19)
+    D_x,D_y,D_z=construct_D_matrices_3D_sparse(M,N,P)
+    L = sparse.vstack([D_x, D_y])
+    L = sparse.vstack([L,D_z])
+    lambda_reg = 10
+    x_cgls,res,k = cgls(A,L,y,max_iter=10000,lambda_reg=lambda_reg)
+    X_cgls = x_cgls.reshape(M,N,P)
+    fig = plt.figure(figsize=(20, 16))
+
+    ax1 = fig.add_subplot(231, projection="3d")
+    ax1.set_title(f"Small bag 3D plot, $\lambda$={lambda_reg},Converged in {k} iterations")
+    x, y, z = np.where(X_cgls > 0.5)
+    scatter=ax1.scatter(x, y, z, c=X_cgls[x, y, z], cmap="viridis", marker="o")
+    ax1.set_xlabel("X-axis")
+    ax1.set_ylabel("Y-axis")
+    ax1.set_zlabel("Z-axis")
+    cbar = fig.colorbar(scatter, ax=ax1, shrink=0.6)
+    cbar.set_label("Intensity")
+    plt.show()
+
+def Q11_large():
+    import matplotlib 
+    matplotlib.use('WebAgg')
+    import matplotlib.pyplot as plt
+    y = loadmat('Large/y.mat')['y']
+    A = loadmat('Large/A.mat')['A']
+    M,N,P = (49,49,49)
+    D_x,D_y,D_z=construct_D_matrices_3D_sparse(M,N,P)
+    L = sparse.vstack([D_x, D_y])
+    L = sparse.vstack([L,D_z])
+    lambda_reg=1e-5
+    x_cgls,res,k = cgls(A,L,y,max_iter=10000,lambda_reg=lambda_reg)
+    X_cgls = x_cgls.reshape(M,N,P)
+    fig = plt.figure(figsize=(20, 16))
+
+    ax1 = fig.add_subplot(231, projection="3d")
+    ax1.set_title(f"Large bag 3D plot, $\lambda$={lambda_reg},Converged in {k} iterations")
+    x, y, z = np.where(X_cgls > 0.5)
+    scatter=ax1.scatter(x, y, z, c=X_cgls[x, y, z], cmap="viridis", marker="o")
+    ax1.set_xlabel("X-axis")
+    ax1.set_ylabel("Y-axis")
+    ax1.set_zlabel("Z-axis")
+    cbar = fig.colorbar(scatter, ax=ax1, shrink=0.6)
+    cbar.set_label("Intensity")
+    plt.show()
+
+def Q12():
+    x = np.array([-4, -3, -2, -1, 0, 1, 2, 3, 4])
+    f1 = np.array([0, 0, 0, 0, 0.5, 1, 1, 1, 1])
+    f2 = np.array([0, 0.0025, 0.0180, 0.1192, 0.5, 0.8808, 0.9820, 0.9975, 1])
+
+    
+    _,D_x =construct_D_matrices(9,1) 
+
+    L1_norm_f1 = np.linalg.norm(D_x@f1,1)
+    L2_norm_f1 = np.linalg.norm(D_x@f1,2)
+
+    L1_norm_f2 = np.linalg.norm(D_x@f2,1)
+    L2_norm_f2 = np.linalg.norm(D_x@f2,2)
+    print(f'l1 f1 = {L1_norm_f1}')
+    print(f'l2 f1 = {L2_norm_f1}')
+    print(f'l1 f2 = {L1_norm_f2}')
+    print(f'l2 f2 = {L2_norm_f2}')
+    
+
+def Q15():
+    import matplotlib 
+    matplotlib.use('WebAgg')
+    import matplotlib.pyplot as plt
+    y = loadmat('Small/y.mat')['y']
+    A = loadmat('Small/A.mat')['A']
+    M,N,P = (19,19,19)
+    D_x,D_y,D_z=construct_D_matrices_3D_sparse(M,N,P)
+    L = sparse.vstack([D_x, D_y])
+    L = sparse.vstack([L,D_z])
+    lambda_reg = 1e-1
+    x_cgls,res,k = cgls(A,L,y,max_iter=10000,lambda_reg=lambda_reg)
+
+    x_0 = x_cgls
+    alpha=0.5/2
+
+    x_irls,res,k = cgls(A,L,y,max_iter=10000,lambda_reg=alpha,x_0=x_0,eps=1e-8,irls=True)
+
+    X_irls = x_irls.reshape(M,N,P)
+    fig = plt.figure(figsize=(20, 16))
+
+    ax1 = fig.add_subplot(231, projection="3d")
+    ax1.set_title(f"Small bag 3D plot of IRLS, alpha={alpha*2},Converged in {k} iterations")
+    x, y, z = np.where(X_irls > 0.5)
+    scatter=ax1.scatter(x, y, z, c=X_irls[x, y, z], cmap="viridis", marker="o")
+    ax1.set_xlabel("X-axis")
+    ax1.set_ylabel("Y-axis")
+    ax1.set_zlabel("Z-axis")
+    cbar = fig.colorbar(scatter, ax=ax1, shrink=0.6)
+    cbar.set_label("Intensity")
+    plt.show()
+
+
+def Q16():
+    import matplotlib 
+    matplotlib.use('WebAgg')
+    import matplotlib.pyplot as plt
+    y = loadmat('Large/y.mat')['y']
+    A = loadmat('Large/A.mat')['A']
+    M,N,P = (49,49,49)
+    D_x,D_y,D_z=construct_D_matrices_3D_sparse(M,N,P)
+    L = sparse.vstack([D_x, D_y])
+    L = sparse.vstack([L,D_z])
+    lambda_reg = 1e-1
+    x_cgls,res,k = cgls(A,L,y,max_iter=10000,lambda_reg=lambda_reg)
+
+    print('CGLS done')
+    x_0 = x_cgls
+    alpha=0.5/2
+
+    x_irls,res,k = cgls(A,L,y,max_iter=10000,lambda_reg=alpha,x_0=x_0,eps=1e-6,irls=True)
+
+    X_irls = x_irls.reshape(M,N,P)
+    fig = plt.figure(figsize=(20, 16))
+
+    ax1 = fig.add_subplot(231, projection="3d")
+    ax1.set_title(f"Small bag 3D plot of IRLS, alpha={alpha*2},Converged in {k} iterations")
+    x, y, z = np.where(X_irls > 0.5)
+    scatter=ax1.scatter(x, y, z, c=X_irls[x, y, z], cmap="viridis", marker="o")
+    ax1.set_xlabel("X-axis")
+    ax1.set_ylabel("Y-axis")
+    ax1.set_zlabel("Z-axis")
+    cbar = fig.colorbar(scatter, ax=ax1, shrink=0.6)
+    cbar.set_label("Intensity")
+    np.save('x_irls.npz',x_irls)
+    plt.show()
+
+Q16()
