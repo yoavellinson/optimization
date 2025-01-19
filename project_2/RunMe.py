@@ -422,7 +422,6 @@ def Q16(plot_web=True):
     ax1.set_zlabel("Z-axis")
     cbar = fig.colorbar(scatter, ax=ax1, shrink=0.6)
     cbar.set_label("Intensity")
-    np.save('x_irls.npz',x_irls)
     plt.show()
 
 
